@@ -5,7 +5,7 @@ Satisfies Micro Project Milestone 1 (Validated disaster/resource data).
 """
 
 import os
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 from src.spatial_engine import calculate_rule_based_priority
 
@@ -100,3 +100,43 @@ def validate_and_clean_datasets(
     )
 
     return clean_inc, clean_res, audit
+
+
+def create_and_validate_incident(
+    incident_dict: Dict[str, Any]
+) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    """
+    Validate and format a newly reported incident from the UI intake form.
+    Returns (is_valid, message, formatted_dict).
+    """
+    lat = float(incident_dict.get("latitude", 0.0))
+    lon = float(incident_dict.get("longitude", 0.0))
+
+    # Bounding box check
+    if not (DELHI_NCR_BOUNDS["min_lat"] <= lat <= DELHI_NCR_BOUNDS["max_lat"] and
+            DELHI_NCR_BOUNDS["min_lon"] <= lon <= DELHI_NCR_BOUNDS["max_lon"]):
+        return False, f"Coordinates ({lat}, {lon}) fall outside the Delhi-NCR bounds.", None
+
+    pop = int(incident_dict.get("affected_population", 0))
+    severity = incident_dict.get("severity_level", "Medium")
+    priority = calculate_rule_based_priority(severity, pop)
+
+    formatted = {
+        "incident_id": incident_dict.get("incident_id", f"INC-DEL-{pd.Timestamp.now().strftime('%H%M%S')}"),
+        "title": incident_dict.get("title", "Unspecified Incident"),
+        "incident_type": incident_dict.get("incident_type", "Flood"),
+        "latitude": round(lat, 4),
+        "longitude": round(lon, 4),
+        "location_name": incident_dict.get("location_name", "Delhi-NCR Sector"),
+        "severity_level": severity,
+        "affected_population": pop,
+        "reported_damage": incident_dict.get("reported_damage", "Initial field assessment in progress."),
+        "status": incident_dict.get("status", "Active"),
+        "timestamp": incident_dict.get("timestamp", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "reported_by": incident_dict.get("reported_by", "Field Operations Unit"),
+        "notes": incident_dict.get("notes", "Submitted via Operations Intake Console."),
+        "priority_score": priority
+    }
+
+    return True, "Incident validated successfully.", formatted
+

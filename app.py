@@ -16,7 +16,12 @@ from src.spatial_engine import (
     find_nearest_resources,
     compute_system_coverage_stats
 )
-from src.data_manager import load_datasets, validate_and_clean_datasets
+from src.data_manager import (
+    load_datasets,
+    validate_and_clean_datasets,
+    create_and_validate_incident,
+    DELHI_NCR_BOUNDS
+)
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -93,14 +98,60 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- Data Ingestion & Caching ---
-@st.cache_data
-def get_system_data():
+# --- Stateful Data Management ---
+if "incidents_df" not in st.session_state or "resources_df" not in st.session_state:
     raw_inc, raw_res = load_datasets()
     clean_inc, clean_res, audit = validate_and_clean_datasets(raw_inc, raw_res)
-    return clean_inc, clean_res, audit
+    st.session_state.incidents_df = clean_inc
+    st.session_state.resources_df = clean_res
+    st.session_state.audit_report = audit
+    st.session_state.dispatch_log = []
+    st.session_state.selected_incident_id = clean_inc["incident_id"].iloc[0] if not clean_inc.empty else None
 
-incidents_df, resources_df, audit_report = get_system_data()
+def reset_system_state():
+    raw_inc, raw_res = load_datasets()
+    clean_inc, clean_res, audit = validate_and_clean_datasets(raw_inc, raw_res)
+    st.session_state.incidents_df = clean_inc
+    st.session_state.resources_df = clean_res
+    st.session_state.audit_report = audit
+    st.session_state.dispatch_log = []
+    st.session_state.selected_incident_id = clean_inc["incident_id"].iloc[0] if not clean_inc.empty else None
+
+def dispatch_unit_to_incident(resource_id: str, incident_id: str, distance_km: float, eta_min: float):
+    res_idx = st.session_state.resources_df.index[st.session_state.resources_df["resource_id"] == resource_id].tolist()
+    if res_idx:
+        st.session_state.resources_df.at[res_idx[0], "availability_status"] = "Busy / Deployed"
+
+    inc_idx = st.session_state.incidents_df.index[st.session_state.incidents_df["incident_id"] == incident_id].tolist()
+    inc_title = "Active Incident"
+    if inc_idx:
+        st.session_state.incidents_df.at[inc_idx[0], "status"] = "Assigned"
+        inc_title = st.session_state.incidents_df.at[inc_idx[0], "title"]
+
+    res_name = st.session_state.resources_df.loc[res_idx[0], "name"] if res_idx else resource_id
+    st.session_state.dispatch_log.insert(0, {
+        "timestamp": pd.Timestamp.now().strftime("%H:%M:%S"),
+        "resource_id": resource_id,
+        "resource_name": res_name,
+        "incident_id": incident_id,
+        "incident_title": inc_title,
+        "distance_km": distance_km,
+        "eta_minutes": eta_min,
+        "status": "In Transit"
+    })
+
+def recall_unit_from_field(resource_id: str):
+    res_idx = st.session_state.resources_df.index[st.session_state.resources_df["resource_id"] == resource_id].tolist()
+    if res_idx:
+        st.session_state.resources_df.at[res_idx[0], "availability_status"] = "Available"
+    for item in st.session_state.dispatch_log:
+        if item["resource_id"] == resource_id and item["status"] == "In Transit":
+            item["status"] = "Returned to Base"
+            break
+
+incidents_df = st.session_state.incidents_df
+resources_df = st.session_state.resources_df
+audit_report = st.session_state.audit_report
 
 # --- Header & Meta Info ---
 st.markdown('<div class="main-header">🚨 AI-Based Disaster Resource Allocation System</div>', unsafe_allow_html=True)
@@ -128,6 +179,68 @@ selected_res_type = st.sidebar.selectbox("Resource Type Needed", resource_types,
 only_available = st.sidebar.checkbox("Show Only Available/Limited Assets", value=True)
 
 radius_km = st.sidebar.slider("Spatial Proximity Radius (km)", min_value=2.0, max_value=20.0, value=7.0, step=0.5)
+
+# --- Sidebar Incident Reporting Form ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("🚨 Report New Disaster Incident", expanded=False):
+    st.caption("Intake verified incident directly into active dispatch grid.")
+    
+    preset_locations = {
+        "Custom Coordinates": (28.6139, 77.2090, "New Delhi Sector"),
+        "Kashmere Gate Lowland": (28.6670, 77.2250, "Kashmere Gate Lowlands"),
+        "Yamuna Bank Flood Basin": (28.6250, 77.2600, "Yamuna Bank Staging Basin"),
+        "Connaught Place Radial": (28.6315, 77.2167, "Connaught Place Inner Circle"),
+        "Rohini Sector 14 Hub": (28.7150, 77.1180, "Rohini Institutional Area"),
+        "Karol Bagh Market": (28.6520, 77.1900, "Karol Bagh Commercial Area"),
+        "Lajpat Nagar Ring Road": (28.5700, 77.2400, "Lajpat Nagar Central"),
+        "Dwarka Sector 21 Hub": (28.5520, 77.0580, "Dwarka Transportation Hub")
+    }
+    
+    selected_preset = st.selectbox("Location Preset", list(preset_locations.keys()), index=0)
+    def_lat, def_lon, def_loc = preset_locations[selected_preset]
+    
+    with st.form("new_incident_form", clear_on_submit=False):
+        new_title = st.text_input("Incident Title", value=f"{selected_preset} Distress Call" if selected_preset != "Custom Coordinates" else "Urgent Distress Call")
+        new_type = st.selectbox("Disaster Category", ["Flood", "Fire / Chemical Hazard", "Structural Collapse", "Medical Outbreak", "Severe Storm"], index=0)
+        c_lat, c_lon = st.columns(2)
+        with c_lat:
+            new_lat = st.number_input("Latitude", value=def_lat, min_value=float(DELHI_NCR_BOUNDS["min_lat"]), max_value=float(DELHI_NCR_BOUNDS["max_lat"]), format="%.4f")
+        with c_lon:
+            new_lon = st.number_input("Longitude", value=def_lon, min_value=float(DELHI_NCR_BOUNDS["min_lon"]), max_value=float(DELHI_NCR_BOUNDS["max_lon"]), format="%.4f")
+        new_loc_name = st.text_input("Locality / Landmark", value=def_loc)
+        new_sev = st.selectbox("Assessed Severity", ["Critical", "High", "Medium", "Low"], index=0)
+        new_pop = st.number_input("Estimated Affected Population", min_value=1, max_value=50000, value=250, step=25)
+        new_damage = st.text_area("Reported Damage / Scene Details", value="Casualties reported on site; emergency perimeter established.")
+        
+        submit_btn = st.form_submit_button("🚨 Submit Incident to Dispatch Grid", width="stretch")
+        if submit_btn:
+            raw_incident = {
+                "title": new_title,
+                "incident_type": new_type,
+                "latitude": new_lat,
+                "longitude": new_lon,
+                "location_name": new_loc_name,
+                "severity_level": new_sev,
+                "affected_population": new_pop,
+                "reported_damage": new_damage,
+                "status": "Active"
+            }
+            is_valid, msg, validated_inc = create_and_validate_incident(raw_incident)
+            if is_valid and validated_inc is not None:
+                new_row_df = pd.DataFrame([validated_inc])
+                st.session_state.incidents_df = pd.concat([new_row_df, st.session_state.incidents_df], ignore_index=True)
+                st.session_state.selected_incident_id = validated_inc["incident_id"]
+                st.success(f"Incident {validated_inc['incident_id']} added and prioritized!")
+                st.rerun()
+            else:
+                st.error(f"Validation failed: {msg}")
+
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Reset to Default Fleet State", key="sidebar_reset_btn", width="stretch"):
+    reset_system_state()
+    st.toast("System reset to default state.")
+    st.rerun()
+
 
 # Filter Incidents DataFrame
 filtered_incidents = incidents_df.copy()
@@ -203,7 +316,7 @@ with tab1:
 
     # Incident Selection Selector for inspection
     incident_choices = {
-        f"[{row['incident_id']}] {row['title']} ({row['severity_level']})": row["incident_id"]
+        f"[{row['incident_id']}] {row['title']} ({row['severity_level']}) - {'[ASSIGNED]' if row.get('status') == 'Assigned' else '[ACTIVE]'}": row["incident_id"]
         for _, row in filtered_incidents.iterrows()
     }
 
@@ -213,8 +326,16 @@ with tab1:
         selected_incident = None
     else:
         with col_details:
-            selected_label = st.selectbox("Inspect Disaster Incident for Dispatch:", list(incident_choices.keys()))
+            choice_keys = list(incident_choices.keys())
+            curr_sel_id = st.session_state.get("selected_incident_id")
+            def_idx = 0
+            for idx, k in enumerate(choice_keys):
+                if incident_choices[k] == curr_sel_id:
+                    def_idx = idx
+                    break
+            selected_label = st.selectbox("Inspect Disaster Incident for Dispatch:", choice_keys, index=def_idx)
             selected_inc_id = incident_choices[selected_label]
+            st.session_state.selected_incident_id = selected_inc_id
             selected_incident = filtered_incidents[filtered_incidents["incident_id"] == selected_inc_id].iloc[0]
 
     with col_map:
@@ -372,6 +493,14 @@ with tab1:
             st.markdown(f"**Location:** {selected_incident['location_name']}")
             st.markdown(f"**Reported Damage:** {selected_incident['reported_damage']}")
             
+            is_assigned = (selected_incident.get("status") == "Assigned")
+            status_badge = (
+                "<span style='background-color: #DCFCE7; color: #166534; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem;'>● DISPATCH ASSIGNED</span>"
+                if is_assigned else
+                "<span style='background-color: #FEE2E2; color: #991B1B; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem;'>● AWAITING RESPONSE</span>"
+            )
+            st.markdown(f"**Operational Status:** {status_badge}", unsafe_allow_html=True)
+            
             p_col1, p_col2 = st.columns(2)
             with p_col1:
                 st.metric("Affected Population", f"{selected_incident['affected_population']:,}")
@@ -404,8 +533,15 @@ with tab1:
                         with btn_col1:
                             st.caption(f"Type: {u['resource_type']}")
                         with btn_col2:
-                            if st.button(f"Pre-Alert Unit #{i+1}", key=f"alert_btn_{u['resource_id']}"):
-                                st.success(f"Dispatched pre-alert notification to {u['name']} via Control Room Link!")
+                            if st.button(f"🚨 Dispatch Unit #{i+1}", key=f"dispatch_btn_{u['resource_id']}_{selected_incident['incident_id']}", width="stretch"):
+                                dispatch_unit_to_incident(
+                                    resource_id=u["resource_id"],
+                                    incident_id=selected_incident["incident_id"],
+                                    distance_km=u["distance_km"],
+                                    eta_min=u["eta_minutes"]
+                                )
+                                st.toast(f"✅ Dispatched {u['name']} to {selected_incident['title']}! ETA: {u['eta_minutes']} min", icon="🚨")
+                                st.rerun()
                         st.divider()
 
 # ==========================================
@@ -413,6 +549,32 @@ with tab1:
 # ==========================================
 with tab2:
     st.subheader("System Registry & Situational Metrics")
+
+    # Active Deployments Log & Controls
+    st.markdown("#### 🚨 Active Dispatch Operations & Fleet Controller")
+    if not st.session_state.dispatch_log:
+        st.info("No units actively dispatched in this session. Select an incident in Tab 1 and click 'Dispatch Unit' to trigger real-time field dispatch.")
+    else:
+        disp_df = pd.DataFrame(st.session_state.dispatch_log)
+        st.dataframe(disp_df, width="stretch", hide_index=True)
+
+        active_transits = [item for item in st.session_state.dispatch_log if item["status"] == "In Transit"]
+        if active_transits:
+            rec_c1, rec_c2 = st.columns([4, 2])
+            with rec_c1:
+                rec_choices = {f"{it['resource_name']} (Dispatched to {it['incident_title']})": it["resource_id"] for it in active_transits}
+                sel_rec_label = st.selectbox("Select Unit to Recall / Return to Base:", list(rec_choices.keys()))
+                sel_rec_id = rec_choices[sel_rec_label]
+            with rec_c2:
+                st.write("")
+                st.write("")
+                if st.button("🔄 Recall Unit (Mark Available)", key="recall_unit_btn", width="stretch"):
+                    recall_unit_from_field(sel_rec_id)
+                    st.toast(f"Unit {sel_rec_id} returned to base and marked Available.")
+                    st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### Situational Overview & Capacity Distributions")
 
     stat_col1, stat_col2 = st.columns(2)
 
