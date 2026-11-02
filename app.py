@@ -1,10 +1,11 @@
 """
 AI-Based Disaster Resource Allocation System
-Micro Project Prototype & GIS Decision Support Dashboard
+Interactive Decision-Support Platform & Live Operations Demo
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import folium
 from folium import plugins
 from streamlit_folium import st_folium
@@ -22,6 +23,10 @@ from src.data_manager import (
     create_and_validate_incident,
     DELHI_NCR_BOUNDS
 )
+from src.ml_severity import get_ml_engine, SEVERITY_CLASSES
+from src.routing_engine import get_road_router, ROAD_GRAPH_NODES
+from src.optimization_engine import run_global_fleet_optimization
+
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -95,8 +100,27 @@ st.markdown("""
         font-weight: 600;
         font-size: 0.8rem;
     }
+    .ai-banner {
+        background-color: #EEF2FF;
+        border: 1px solid #C7D2FE;
+        border-left: 4px solid #4F46E5;
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin: 8px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+# --- Core Engines Initialization ---
+@st.cache_resource
+def load_ml_and_routing_engines():
+    ml = get_ml_engine()
+    router = get_road_router()
+    return ml, router
+
+ml_engine, road_router = load_ml_and_routing_engines()
+
 
 # --- Stateful Data Management ---
 if "incidents_df" not in st.session_state or "resources_df" not in st.session_state:
@@ -153,17 +177,19 @@ incidents_df = st.session_state.incidents_df
 resources_df = st.session_state.resources_df
 audit_report = st.session_state.audit_report
 
+
 # --- Header & Meta Info ---
 st.markdown('<div class="main-header">🚨 AI-Based Disaster Resource Allocation System</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="sub-header">'
     '<b>Micro Project Stage — GIS-Based Proximity & Spatial Decision-Support Foundation</b> &bull; '
-    'Geospatial Operations & Emergency Logistics Platform'
+    'Geospatial Operations, Machine Learning Assessment & Emergency Logistics Platform'
     '</div>',
     unsafe_allow_html=True
 )
 
-# --- Sidebar Filters ---
+
+# --- Sidebar Controls ---
 st.sidebar.image("https://img.icons8.com/color/96/000000/siren.png", width=64)
 st.sidebar.header("Operations Control")
 
@@ -179,6 +205,23 @@ selected_res_type = st.sidebar.selectbox("Resource Type Needed", resource_types,
 only_available = st.sidebar.checkbox("Show Only Available/Limited Assets", value=True)
 
 radius_km = st.sidebar.slider("Spatial Proximity Radius (km)", min_value=2.0, max_value=20.0, value=7.0, step=0.5)
+
+# --- Navigation & Hazard Simulation Controls ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🛣️ Road Network & Hazard Simulation")
+routing_mode = st.sidebar.radio(
+    "Transit Routing Engine",
+    ["🛣️ Graph Road Network (Dijkstra Turn-by-Turn)", "📏 Direct Geodesic (Haversine)"],
+    index=0
+)
+
+sim_yamuna_blockage = st.sidebar.checkbox("🌊 Simulate Yamuna Bridge Inundation (Flood Block)", value=False)
+sim_mundka_blockage = st.sidebar.checkbox("🔥 Simulate Rohtak Road Fire Barrier (Chemical Block)", value=False)
+
+# Update router blockage state
+road_router.set_blockage("KASHMERE_GATE", "YAMUNA_BRIDGE", sim_yamuna_blockage)
+road_router.set_blockage("PASCHIM_VIHAR", "MUNDKA_IND", sim_mundka_blockage)
+
 
 # --- Sidebar Incident Reporting Form ---
 st.sidebar.markdown("---")
@@ -242,14 +285,13 @@ if st.sidebar.button("🔄 Reset to Default Fleet State", key="sidebar_reset_btn
     st.rerun()
 
 
-# Filter Incidents DataFrame
+# --- Filtered Data ---
 filtered_incidents = incidents_df.copy()
 if selected_inc_type != "All":
     filtered_incidents = filtered_incidents[filtered_incidents["incident_type"] == selected_inc_type]
 if selected_severity != "All":
     filtered_incidents = filtered_incidents[filtered_incidents["severity_level"] == selected_severity]
 
-# Filter Resources DataFrame
 filtered_resources = resources_df.copy()
 if selected_res_type != "All":
     filtered_resources = filtered_resources[filtered_resources["resource_type"] == selected_res_type]
@@ -300,13 +342,17 @@ with m5:
 
 st.write("")
 
-# --- Main Tabs ---
-tab1, tab2, tab3, tab4 = st.tabs([
+
+# --- Main Dashboard Tabs ---
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🗺️ Live GIS Command Center",
+    "🤖 AI Severity Model & Inference",
+    "⚡ Global Fleet Allocation Optimizer",
     "📊 Situational Analytics & Registry",
     "🔍 Data Preprocessing & Parameters",
     "🚀 System Architecture & Flowchart"
 ])
+
 
 # ==========================================
 # TAB 1: GIS COMMAND CENTER
@@ -375,6 +421,9 @@ with tab1:
         for _, res in filtered_resources.iterrows():
             res_color = resource_colors.get(res["resource_type"], "blue")
             res_icon = resource_icons.get(res["resource_type"], "info-sign")
+            is_deployed = res["availability_status"] == "Busy / Deployed"
+            if is_deployed:
+                res_color = "orange"
 
             popup_html = f"""
             <div style="font-family: Arial, sans-serif; min-width: 200px;">
@@ -382,8 +431,8 @@ with tab1:
                 <p style="margin: 4px 0; font-size: 12px; color: #64748B;"><b>ID:</b> {res['resource_id']}</p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Type:</b> {res['resource_type']}</p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Base:</b> {res['base_station']}</p>
-                <p style="margin: 4px 0; font-size: 12px;"><b>Capacity:</b> {res['capacity']} units/persons</p>
-                <p style="margin: 4px 0; font-size: 12px;"><b>Status:</b> <span style="font-weight:bold; color:green;">{res['availability_status']}</span></p>
+                <p style="margin: 4px 0; font-size: 12px;"><b>Capacity:</b> {res['capacity']} units</p>
+                <p style="margin: 4px 0; font-size: 12px;"><b>Status:</b> <span style="font-weight:bold; color:{'#EA580C' if is_deployed else '#16A34A'};">{res['availability_status']}</span></p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Helpline:</b> {res.get('contact_number', 'N/A')}</p>
             </div>
             """
@@ -413,12 +462,12 @@ with tab1:
                 <p style="margin: 4px 0; font-size: 12px;"><b>ID:</b> {inc['incident_id']} | <b>Type:</b> {inc['incident_type']}</p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Location:</b> {inc['location_name']}</p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Severity:</b> <b>{inc['severity_level']}</b> (Score: {inc['priority_score']}/100)</p>
+                <p style="margin: 4px 0; font-size: 12px;"><b>Status:</b> <b>{inc.get('status', 'Active')}</b></p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Affected Pop.:</b> {inc['affected_population']:,}</p>
                 <p style="margin: 4px 0; font-size: 12px;"><b>Reported Damage:</b> {inc['reported_damage']}</p>
             </div>
             """
 
-            # Incident Circle marker
             folium.CircleMarker(
                 location=[inc["latitude"], inc["longitude"]],
                 radius=10 if not is_active_selected else 14,
@@ -428,16 +477,16 @@ with tab1:
                 fill_color=m_color,
                 fill_opacity=0.9 if is_active_selected else 0.7,
                 popup=folium.Popup(inc_popup, max_width=320),
-                tooltip=f"Incident: {inc['title']} [{inc['severity_level']}]"
+                tooltip=f"Incident: {inc['title']} [{inc['severity_level']}] - {inc.get('status', 'Active')}"
             ).add_to(folium_map)
 
-        # If an incident is selected, compute nearest resources and draw lines & radius
+        # Nearest resources and routing paths
         nearest_units = []
         if selected_incident is not None:
             inc_lat = selected_incident["latitude"]
             inc_lon = selected_incident["longitude"]
 
-            # Draw spatial buffer circle
+            # Response buffer circle
             folium.Circle(
                 location=[inc_lat, inc_lon],
                 radius=radius_km * 1000,
@@ -461,20 +510,53 @@ with tab1:
                 max_radius_km=radius_km * 1.5
             )
 
-            # Draw trajectory lines to nearest resources
+            # Draw routes to nearest resources
             for idx, unit in enumerate(nearest_units):
                 line_color = "#2563EB" if idx == 0 else "#64748B"
-                weight = 3 if idx == 0 else 2
+                weight = 4 if idx == 0 else 2
                 
-                folium.PolyLine(
-                    locations=[[inc_lat, inc_lon], [unit["latitude"], unit["longitude"]]],
-                    color=line_color,
-                    weight=weight,
-                    dash_array="6, 6",
-                    tooltip=f"Dispatch Path #{idx+1} to {unit['name']}: {unit['distance_km']} km (ETA ~{unit['eta_minutes']}m)"
+                if "Graph Road Network" in routing_mode:
+                    calc_route = road_router.calculate_road_route(unit["latitude"], unit["longitude"], inc_lat, inc_lon)
+                    route_pts = calc_route["route_coordinates"]
+                    is_detour = calc_route.get("detour_active", False)
+                    corridor_str = " ➔ ".join(calc_route.get("corridors_traversed", ["Direct"]))
+                    
+                    folium.PolyLine(
+                        locations=route_pts,
+                        color="#DC2626" if (is_detour and idx == 0) else line_color,
+                        weight=weight,
+                        dash_array=None if idx == 0 else "5, 5",
+                        tooltip=f"Turn-by-Turn Route #{idx+1} to {unit['name']}: {calc_route['total_distance_km']} km (ETA ~{calc_route['estimated_eta_min']}m) | Corridors: {corridor_str}"
+                    ).add_to(folium_map)
+                else:
+                    folium.PolyLine(
+                        locations=[[inc_lat, inc_lon], [unit["latitude"], unit["longitude"]]],
+                        color=line_color,
+                        weight=weight,
+                        dash_array="6, 6",
+                        tooltip=f"Geodesic Line #{idx+1} to {unit['name']}: {unit['distance_km']} km (ETA ~{unit['eta_minutes']}m)"
+                    ).add_to(folium_map)
+
+            # If blockage active, show hazard marker on map
+            if sim_yamuna_blockage:
+                folium.Marker(
+                    location=[28.6610, 77.2400],
+                    popup="<b>⛔ HAZARD ROADBLOCK: Old Yamuna Bridge Causeway Submerged under Floodwater</b>",
+                    tooltip="⛔ HAZARD: Yamuna Bridge Submerged",
+                    icon=folium.Icon(color="red", icon="ban", prefix="fa")
+                ).add_to(folium_map)
+            if sim_mundka_blockage:
+                folium.Marker(
+                    location=[28.6812, 77.0321],
+                    popup="<b>⛔ HAZARD ROADBLOCK: Rohtak Road NH-10 Impassable (Chemical Fire Barrier)</b>",
+                    tooltip="⛔ HAZARD: Rohtak Road Blocked",
+                    icon=folium.Icon(color="darkred", icon="fire", prefix="fa")
                 ).add_to(folium_map)
 
         st_folium(folium_map, width="100%", height=560)
+
+        if sim_yamuna_blockage or sim_mundka_blockage:
+            st.warning("⚠️ **Dynamic Detour Active:** Real-time arterial graph router has recomputed paths around submerged/blocked corridors using NetworkX Dijkstra shortest path.")
 
     # --- Details & Recommendation Column ---
     with col_details:
@@ -500,6 +582,24 @@ with tab1:
                 "<span style='background-color: #FEE2E2; color: #991B1B; padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem;'>● AWAITING RESPONSE</span>"
             )
             st.markdown(f"**Operational Status:** {status_badge}", unsafe_allow_html=True)
+
+            # AI Inference Assessment
+            ml_pred = ml_engine.predict(
+                disaster_type=selected_incident["incident_type"],
+                affected_population=int(selected_incident["affected_population"]),
+                damage_index=8 if selected_incident["severity_level"] == "Critical" else (6 if selected_incident["severity_level"] == "High" else 3),
+                weather_risk=4 if selected_incident["incident_type"] == "Flood" else 2,
+                vulnerability_index=4 if selected_incident["severity_level"] in ["Critical", "High"] else 2,
+                collapse_flag=1 if selected_incident["incident_type"] == "Structural Collapse" else 0
+            )
+
+            st.markdown(
+                f"<div class='ai-banner'>"
+                f"<b>🤖 AI Model Severity Classification:</b> <b style='color:#4338CA;'>{ml_pred['predicted_class'].upper()}</b> "
+                f"&bull; Confidence: <b>{ml_pred['confidence_pct']}%</b> &bull; Regressed Score: <b>{ml_pred['predicted_score']}/100</b>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
             
             p_col1, p_col2 = st.columns(2)
             with p_col1:
@@ -511,13 +611,25 @@ with tab1:
 
             st.markdown("---")
             st.markdown("### 🎯 Nearest Resource Dispatch Recommendations")
-            st.caption(f"Spatial association using Great-Circle Haversine distance & urban emergency transit model (within {radius_km} km radius).")
+            st.caption(f"Calculated via {routing_mode.split()[1]} & urban transit velocity model.")
 
             if not nearest_units:
                 st.error("⚠️ No available emergency resources found within the specified radius. Recommend expanding the search buffer or requesting mutual aid from neighboring districts.")
             else:
                 for i, u in enumerate(nearest_units):
                     rank_icon = "🥇" if i == 0 else ("🥈" if i == 1 else "🥉")
+                    
+                    # Calculate road route for the unit
+                    unit_dist = u["distance_km"]
+                    unit_eta = u["eta_minutes"]
+                    corridor_summary = "Direct Geodesic"
+                    
+                    if "Graph Road Network" in routing_mode:
+                        r_info = road_router.calculate_road_route(u["latitude"], u["longitude"], selected_incident["latitude"], selected_incident["longitude"])
+                        unit_dist = r_info["total_distance_km"]
+                        unit_eta = r_info["estimated_eta_min"]
+                        corridor_summary = " ➔ ".join(r_info.get("corridors_traversed", ["Arterial Route"]))
+
                     with st.container():
                         st.markdown(f"**{rank_icon} Rank #{i+1}: {u['name']}**")
                         c_u1, c_u2, c_u3 = st.columns([3, 2, 2])
@@ -525,35 +637,175 @@ with tab1:
                             st.write(f"🏢 *{u['base_station']}*")
                             st.write(f"📞 `{u['contact_number']}`")
                         with c_u2:
-                            st.metric("Distance", f"{u['distance_km']} km")
+                            st.metric("Route Dist", f"{unit_dist} km")
                         with c_u3:
-                            st.metric("Est. ETA", f"{u['eta_minutes']} min")
+                            st.metric("Est. ETA", f"{unit_eta} min")
                         
                         btn_col1, btn_col2 = st.columns([3, 2])
                         with btn_col1:
-                            st.caption(f"Type: {u['resource_type']}")
+                            st.caption(f"Corridor: {corridor_summary}")
                         with btn_col2:
                             if st.button(f"🚨 Dispatch Unit #{i+1}", key=f"dispatch_btn_{u['resource_id']}_{selected_incident['incident_id']}", width="stretch"):
                                 dispatch_unit_to_incident(
                                     resource_id=u["resource_id"],
                                     incident_id=selected_incident["incident_id"],
-                                    distance_km=u["distance_km"],
-                                    eta_min=u["eta_minutes"]
+                                    distance_km=unit_dist,
+                                    eta_min=unit_eta
                                 )
-                                st.toast(f"✅ Dispatched {u['name']} to {selected_incident['title']}! ETA: {u['eta_minutes']} min", icon="🚨")
+                                st.toast(f"✅ Dispatched {u['name']} to {selected_incident['title']}! ETA: {unit_eta} min", icon="🚨")
                                 st.rerun()
                         st.divider()
 
+
 # ==========================================
-# TAB 2: SITUATIONAL ANALYTICS & REGISTRY
+# TAB 2: AI SEVERITY MODEL & INFERENCE
 # ==========================================
 with tab2:
+    st.subheader("🤖 Supervised Machine Learning Severity Assessment Engine")
+    st.markdown("""
+    This module implements the **AI-based severity assessment enhancement** (Section 5.8 of synopsis). 
+    A **Random Forest Classifier & Regressor** is trained on historical and simulated multi-hazard NDMA indicators 
+    to categorize disaster urgency and predict continuous damage impact scores.
+    """)
+
+    metrics = ml_engine.metrics
+    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+    with sc1:
+        st.metric("Model Accuracy", f"{metrics['accuracy']}%")
+    with sc2:
+        st.metric("Precision (Weighted)", f"{metrics['precision']}%")
+    with sc3:
+        st.metric("Recall (Sensitivity)", f"{metrics['recall']}%")
+    with sc4:
+        st.metric("F1-Score", f"{metrics['f1_score']}%")
+    with sc5:
+        st.metric("Score MAE", f"±{metrics['mae']} pts")
+
+    st.markdown("---")
+    col_feat, col_sandbox = st.columns([6, 6])
+
+    with col_feat:
+        st.markdown("#### 📊 Model Feature Importance (Gini Impurity Reduction)")
+        st.caption("How much each real-world variable drives the AI model's severity categorization:")
+        
+        fi = metrics["feature_importance"]
+        fi_df = pd.DataFrame(list(fi.items()), columns=["Disaster Indicator", "Influence Weight (%)"]).sort_values(by="Influence Weight (%)", ascending=False)
+        st.dataframe(fi_df, width="stretch", hide_index=True)
+        st.bar_chart(data=fi_df.set_index("Disaster Indicator"))
+
+        st.markdown("#### 🎯 Classification Confusion Matrix")
+        cm_df = pd.DataFrame(metrics["confusion_matrix"], index=metrics["classes"], columns=[f"Pred {c}" for c in metrics["classes"]])
+        st.dataframe(cm_df, width="stretch")
+
+    with col_sandbox:
+        st.markdown("#### 🧪 Interactive AI Inference Sandbox")
+        st.caption("Test the trained machine learning model in real-time with custom disaster conditions:")
+        
+        with st.form("ai_inference_sandbox_form"):
+            s_type = st.selectbox("Disaster Category", ["Flood", "Fire / Chemical Hazard", "Structural Collapse", "Medical Outbreak", "Severe Storm"], index=0)
+            s_pop = st.slider("Affected Population Count", min_value=10, max_value=5000, value=750, step=50)
+            s_dmg = st.slider("Infrastructure Damage Severity Index (1=Cosmetic, 10=Total Collapse)", min_value=1, max_value=10, value=7)
+            s_weather = st.slider("Weather Escalation Risk Factor (1=Calm, 5=Severe Storm)", min_value=1, max_value=5, value=4)
+            s_vuln = st.slider("Locality Vulnerability Index (1=Planned Sector, 5=Dense Informal)", min_value=1, max_value=5, value=4)
+            s_collapse = st.radio("Structural Building Collapse Reported?", [("No", 0), ("Yes", 1)], format_func=lambda x: x[0], index=1)[1]
+            
+            run_ai_btn = st.form_submit_button("⚡ Run AI Severity Assessment", width="stretch")
+
+        if run_ai_btn:
+            pred_res = ml_engine.predict(
+                disaster_type=s_type,
+                affected_population=s_pop,
+                damage_index=s_dmg,
+                weather_risk=s_weather,
+                vulnerability_index=s_vuln,
+                collapse_flag=s_collapse
+            )
+            
+            st.success(f"### Predicted Priority: {pred_res['predicted_class'].upper()}")
+            c_p1, c_p2 = st.columns(2)
+            with c_p1:
+                st.metric("Predicted Severity Score", f"{pred_res['predicted_score']} / 100")
+            with c_p2:
+                st.metric("Model Confidence", f"{pred_res['confidence_pct']}%")
+            
+            st.progress(pred_res['predicted_score'] / 100.0)
+            st.markdown("##### Class Probability Distribution:")
+            prob_df = pd.DataFrame(list(pred_res["class_probabilities"].items()), columns=["Severity Class", "Probability (%)"])
+            st.dataframe(prob_df, width="stretch", hide_index=True)
+
+
+# ==========================================
+# TAB 3: GLOBAL FLEET ALLOCATION OPTIMIZER
+# ==========================================
+with tab3:
+    st.subheader("⚡ Jurisdiction-Wide Multi-Incident Global Optimization Engine")
+    st.markdown("""
+    While greedy nearest-neighbor matching allocates one incident at a time, large-scale disasters require
+    **global multi-resource optimization**. This engine formulates a bipartite matching problem solved via the 
+    **Hungarian Algorithm** (`scipy.optimize.linear_sum_assignment`), balancing response time against incident severity.
+    """)
+
+    opt_alpha = st.slider("Optimization Weight $\\alpha$ (Transit Time Minimization)", min_value=0.1, max_value=1.0, value=0.6, step=0.05)
+    opt_beta = round(1.0 - opt_alpha, 2)
+    st.caption(f"Active Objective: $\\min \\sum ( {opt_alpha} \\times \\text{{ETA}} - {opt_beta} \\times \\text{{Priority}} )$")
+
+    if st.button("⚡ Compute Global Optimal Fleet Allocation", key="run_opt_btn", width="stretch"):
+        opt_result = run_global_fleet_optimization(incidents_df, resources_df, time_weight_alpha=opt_alpha, priority_weight_beta=opt_beta)
+        st.session_state.global_opt_result = opt_result
+
+    if "global_opt_result" in st.session_state and st.session_state.global_opt_result["success"]:
+        res = st.session_state.global_opt_result
+        st.success(f"✅ {res['message']}")
+
+        o1, o2, o3, o4 = st.columns(4)
+        with o1:
+            st.metric("Matched Incidents", f"{res['assigned_count']}")
+        with o2:
+            st.metric("Cumulative Distance", f"{res['total_distance_km']} km")
+        with o3:
+            st.metric("Average Global ETA", f"{res['avg_eta_min']} min")
+        with o4:
+            st.metric("Priority Demand Served", f"{res['priority_served_pct']}%")
+
+        st.markdown("#### Optimal Allocation Dispatch Matrix:")
+        opt_table_data = []
+        for match in res["assignments"]:
+            opt_table_data.append({
+                "Incident ID": match["incident_id"],
+                "Disaster Target": match["incident_title"],
+                "Severity": match["incident_severity"],
+                "Priority Score": match["incident_priority"],
+                "Assigned Unit": match["resource_name"],
+                "Unit Type": match["resource_type"],
+                "Base Station": match["base_station"],
+                "Route Dist": f"{match['distance_km']} km",
+                "Est. ETA": f"{match['eta_minutes']} min"
+            })
+        st.dataframe(pd.DataFrame(opt_table_data), width="stretch", hide_index=True)
+
+        if st.button("🚨 Commit Global Allocation to Active Fleet (Bulk Dispatch)", key="commit_bulk_dispatch", width="stretch"):
+            for match in res["assignments"]:
+                dispatch_unit_to_incident(
+                    resource_id=match["resource_id"],
+                    incident_id=match["incident_id"],
+                    distance_km=match["distance_km"],
+                    eta_min=match["eta_minutes"]
+                )
+            st.success("Global dispatch executed! All matched emergency units are deployed.")
+            del st.session_state.global_opt_result
+            st.rerun()
+
+
+# ==========================================
+# TAB 4: SITUATIONAL ANALYTICS & REGISTRY
+# ==========================================
+with tab4:
     st.subheader("System Registry & Situational Metrics")
 
     # Active Deployments Log & Controls
     st.markdown("#### 🚨 Active Dispatch Operations & Fleet Controller")
     if not st.session_state.dispatch_log:
-        st.info("No units actively dispatched in this session. Select an incident in Tab 1 and click 'Dispatch Unit' to trigger real-time field dispatch.")
+        st.info("No units actively dispatched in this session. Select an incident in Tab 1 or run the Global Optimizer in Tab 3 to trigger field dispatches.")
     else:
         disp_df = pd.DataFrame(st.session_state.dispatch_log)
         st.dataframe(disp_df, width="stretch", hide_index=True)
@@ -621,10 +873,11 @@ with tab2:
             mime="text/csv"
         )
 
+
 # ==========================================
-# TAB 3: DATA PREPROCESSING & PARAMETERS
+# TAB 5: DATA PREPROCESSING & PARAMETERS
 # ==========================================
-with tab3:
+with tab5:
     st.subheader("Data Preprocessing Pipeline & Parameters (Sections 5.2 & 5.11)")
     st.markdown("""
     The system follows a strict preprocessing pipeline that validates coordinates, removes duplicates, 
@@ -652,10 +905,11 @@ with tab3:
     ]
     st.dataframe(pd.DataFrame(param_table), width="stretch", hide_index=True)
 
+
 # ==========================================
-# TAB 4: SYSTEM ARCHITECTURE & FLOWCHART
+# TAB 6: SYSTEM ARCHITECTURE & FLOWCHART
 # ==========================================
-with tab4:
+with tab6:
     st.subheader("System Architecture & Workflow (Section 6 & Figure 1)")
     
     col_flow, col_comp = st.columns([6, 6])
@@ -703,21 +957,22 @@ with tab4:
     with col_comp:
         st.markdown("#### Core Implementation vs. Future AI Enhancement")
         st.info(
-            "**Scope Distinction:** The core micro project focuses on building a functional "
+            "**Scope Distinction:** The core micro project delivers a functional "
             "GIS-based mapping and visualisation system for disaster-affected areas and available "
-            "resources, along with basic rule-based severity assessment and nearest-unit distribution. "
-            "AI-based multi-objective optimization is reserved as a future enhancement."
+            "resources. The live platform now also demonstrates prototype implementations of the "
+            "planned AI enhancements (supervised Random Forest severity models, NetworkX road routing, "
+            "and Hungarian global multi-incident optimization)."
         )
 
         st.markdown("#### Table V. Functional Requirements / System Components")
         comp_table = [
-            {"Component": "Disaster Data Input Module", "Description": "Accepts and structures disaster event data", "Status": "Core"},
-            {"Component": "Data Preprocessing Module", "Description": "Cleans and validates incoming data", "Status": "Core"},
-            {"Component": "GIS Mapping Module", "Description": "Visualises affected areas on an interactive map", "Status": "Core"},
-            {"Component": "Resource Mapping Module", "Description": "Visualises resource locations and quantities", "Status": "Core"},
-            {"Component": "Priority Assessment Module", "Description": "Ranks affected zones by severity", "Status": "Core (rule-based)"},
-            {"Component": "Dashboard Module", "Description": "Integrates all outputs into a single interface", "Status": "Core"},
-            {"Component": "AI Allocation Module", "Description": "Optimises resource distribution using machine learning", "Status": "Future Enhancement"}
+            {"Component": "Disaster Data Input Module", "Description": "Accepts and structures disaster event data", "Status": "Core (Operational)"},
+            {"Component": "Data Preprocessing Module", "Description": "Cleans and validates incoming data", "Status": "Core (Operational)"},
+            {"Component": "GIS Mapping Module", "Description": "Visualises affected areas on an interactive map", "Status": "Core (Operational)"},
+            {"Component": "Resource Mapping Module", "Description": "Visualises resource locations and quantities", "Status": "Core (Operational)"},
+            {"Component": "Priority Assessment Module", "Description": "Ranks affected zones by severity (Rule & AI)", "Status": "Core & AI Model"},
+            {"Component": "Dashboard Module", "Description": "Integrates all outputs into a single interface", "Status": "Core (Operational)"},
+            {"Component": "AI Allocation Module", "Description": "Optimises resource distribution using machine learning", "Status": "AI Prototype (Operational)"}
         ]
         st.dataframe(pd.DataFrame(comp_table), width="stretch", hide_index=True)
 
@@ -729,11 +984,13 @@ with tab4:
         {"Category": "Geospatial Processing", "Technology / Tool": "GeoPandas", "Purpose": "Spatial operations such as zone identification"},
         {"Category": "Map Visualisation", "Technology / Tool": "Folium (Leaflet.js)", "Purpose": "Rendering of interactive maps"},
         {"Category": "Base Map Data", "Technology / Tool": "OpenStreetMap", "Purpose": "Open-source base map layers"},
-        {"Category": "GIS Development Tool", "Technology / Tool": "QGIS", "Purpose": "Offline inspection and validation of geospatial datasets"},
-        {"Category": "Dashboard Framework", "Technology / Tool": "Streamlit / Flask", "Purpose": "Browser-accessible user interface"},
-        {"Category": "Future Analytics", "Technology / Tool": "ML / optimisation libraries", "Purpose": "Planned AI-based severity assessment and allocation"}
+        {"Category": "Machine Learning", "Technology / Tool": "Scikit-Learn (Random Forest)", "Purpose": "Severity classification and continuous damage regression"},
+        {"Category": "Graph Routing", "Technology / Tool": "NetworkX (Dijkstra)", "Purpose": "Turn-by-turn road network routing with hazard blockages"},
+        {"Category": "Global Optimization", "Technology / Tool": "SciPy (Hungarian Algorithm)", "Purpose": "Jurisdiction-wide multi-incident optimal resource dispatch"},
+        {"Category": "Dashboard Framework", "Technology / Tool": "Streamlit", "Purpose": "Browser-accessible operations console"}
     ]
     st.dataframe(pd.DataFrame(tech_table), width="stretch", hide_index=True)
+
 
 # --- Footer ---
 st.markdown("---")
